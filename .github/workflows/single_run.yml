@@ -181,7 +181,8 @@ jobs:
           python -u main.py
 
       - name: Deploy database to data branch
-        if: always()
+        # Persist partial delivery progress, but never deploy a failed decode.
+        if: ${{ always() && steps.db-before.outcome == 'success' }}
         env:
           STUID: ${{ secrets.STUID }}
           UISPSW: ${{ secrets.UISPSW }}
