@@ -213,10 +213,9 @@ def _send_email(emailer: Emailer | None, db: Database, reporter: Reporter,
         raise ValueError("Email limit must be non-negative.")
     unsent = db.get_unsent_lectures()
     if unsent:
-        # Keep new summaries ahead of older pending ones, with deterministic
-        # ordering for a limited email-only run.
+        # Keep new summaries first; drain recovered summaries chronologically.
         unsent.sort(key=lambda row: (str(row.get("date") or ""),
-                                     str(row["sub_id"])), reverse=True)
+                                     str(row["sub_id"])))
         seen_sub_ids = {str(item["sub_id"]) for item in email_items}
         for row in unsent:
             if str(row["sub_id"]) not in seen_sub_ids:
