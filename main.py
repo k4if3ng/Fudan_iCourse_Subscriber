@@ -13,19 +13,25 @@ AudioDownloader.  This file does only orchestration:
 Anything more interesting belongs in one of ``src/*`` modules.
 """
 
+from __future__ import annotations
+
+import argparse
+import os
 import time
 import traceback
+from typing import TYPE_CHECKING
 
 from src.runtime import config
 from src.data.database import Database
 from src.api.emailer import Emailer
-from src.api.icourse import ICourseClient
-from src.pipeline.lecture_runner import LectureRunner
 from src.runtime.reporter import Reporter
-from src.runtime.scheduler import Scheduler
-from src.ai.summarizer import Summarizer
-from src.ai.transcriber import Transcriber
-from src.api.webvpn import WebVPNSession
+
+if TYPE_CHECKING:
+    from src.api.icourse import ICourseClient
+    from src.runtime.scheduler import Scheduler
+    from src.ai.summarizer import Summarizer
+    from src.ai.transcriber import Transcriber
+    from src.api.webvpn import WebVPNSession
 
 
 def login_with_retry(max_attempts: int = 10) -> WebVPNSession:
@@ -38,6 +44,8 @@ def login_with_retry(max_attempts: int = 10) -> WebVPNSession:
     long tail of times when CAS rejects multiple fresh sessions in a
     row before letting one through.
     """
+    from src.api.webvpn import WebVPNSession
+
     for attempt in range(max_attempts):
         try:
             vpn = WebVPNSession()
@@ -158,6 +166,8 @@ def _drive_lectures(client: ICourseClient, db: Database,
     if not all_lectures:
         return
 
+    from src.pipeline.lecture_runner import LectureRunner
+
     runner = LectureRunner(
         client, db, scheduler, transcriber, summarizer, reporter,
     )
@@ -197,8 +207,10 @@ def _drive_lectures(client: ICourseClient, db: Database,
 
 
 def _send_email(emailer: Emailer | None, db: Database, reporter: Reporter,
-                email_items: list) -> bool:
+                email_items: list, limit: int = 0) -> bool:
     """Send lectures separately and persist each successful delivery."""
+    if limit < 0:
+        raise ValueError("Email limit must be non-negative.")
     unsent = db.get_unsent_lectures()
     if unsent:
         seen_sub_ids = {str(item["sub_id"]) for item in email_items}
@@ -219,6 +231,11 @@ def _send_email(emailer: Emailer | None, db: Database, reporter: Reporter,
     # Preserve order while ensuring each lecture is submitted only once.
     email_items = list({str(item["sub_id"]): item
                         for item in email_items}.values())
+    deferred = max(0, len(email_items) - limit) if limit else 0
+    if limit:
+        email_items = email_items[:limit]
+    if deferred:
+        reporter.info(f"[Email] Delivery limit: deferring {deferred} lecture(s).")
     sent = 0
     try:
         reporter.email_summary(len(email_items))
@@ -244,7 +261,8 @@ def _send_email(emailer: Emailer | None, db: Database, reporter: Reporter,
         traceback.print_exc()
         return False
     pending = len(email_items) - sent
-    reporter.info(f"[Email] SMTP accepted and saved: {sent}; pending: {pending}.")
+    reporter.info(f"[Email] SMTP accepted and saved: {sent}; "
+                  f"failed or unattempted in batch: {pending}; deferred: {deferred}.")
     return pending == 0
 
 
@@ -310,10 +328,33 @@ def _crawl_semester_catalog(client: ICourseClient, db: Database,
     reporter.info("Semester catalog crawl complete.")
 
 
-def run():
+def run(email_only: bool = False, email_limit: int = 0):
     """Single execution of the full pipeline."""
     reporter = Reporter()
     reporter.run_header()
+
+    if email_only:
+        if not all((config.SMTP_EMAIL, config.SMTP_PASSWORD, config.RECEIVER_EMAIL)):
+            raise RuntimeError("Email-only mode requires SMTP_EMAIL, "
+                               "SMTP_PASSWORD and RECEIVER_EMAIL.")
+        if not os.path.isfile(config.DB_PATH):
+            raise RuntimeError("Email-only mode requires an existing decoded database.")
+        reporter.info("[Email-only] Sending pending summaries without course processing.")
+        db = Database()
+        try:
+            email_ok = _send_email(Emailer(), db, reporter, [], limit=email_limit)
+        finally:
+            # Flush WAL changes before Actions hashes and persists the DB.
+            db.conn.close()
+        reporter.run_footer(success=email_ok)
+        if not email_ok:
+            raise RuntimeError("Email delivery incomplete; unsent summaries remain pending.")
+        return
+
+    from src.api.icourse import ICourseClient
+    from src.runtime.scheduler import Scheduler
+    from src.ai.summarizer import Summarizer
+    from src.ai.transcriber import Transcriber
 
     if not config.COURSE_IDS and not config.CRAWL_TERM:
         reporter.info(
@@ -364,4 +405,14 @@ def run():
 
 
 if __name__ == "__main__":
-    run()
+    parser = argparse.ArgumentParser(description="iCourse Subscriber")
+    parser.add_argument("--email-only", action="store_true",
+                        help="Send pending summaries without processing courses.")
+    parser.add_argument("--email-limit", type=int, default=0,
+                        help="Maximum lectures in email-only mode; 0 sends all pending.")
+    args = parser.parse_args()
+    if args.email_limit < 0:
+        parser.error("--email-limit must be non-negative")
+    if args.email_limit and not args.email_only:
+        parser.error("--email-limit requires --email-only")
+    run(email_only=args.email_only, email_limit=args.email_limit)

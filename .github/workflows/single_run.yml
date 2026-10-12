@@ -16,6 +16,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: icourse-database
+  cancel-in-progress: false
+
 jobs:
   run:
     runs-on: ubuntu-latest
