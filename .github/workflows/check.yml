@@ -53,12 +53,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ffmpeg
 
-      - name: Install PDF delivery dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y fonts-noto-cjk libpango-1.0-0 libcairo2
-          pip install weasyprint
-
       - name: Cache ASR models
         if: ${{ !inputs.email_only }}
         id: cache-models

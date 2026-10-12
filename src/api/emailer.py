@@ -1,5 +1,4 @@
 import re
-import base64
 import smtplib
 import time
 import zipfile
@@ -337,7 +336,7 @@ class Emailer:
         self.last_error_code = None
         self.last_rate_limited = False
         self.last_content_rejected = False
-        if mode not in ("html", "plain", "attachment", "pdf", "archive"):
+        if mode not in ("html", "archive"):
             raise ValueError(f"Unsupported email mode: {mode}")
         if not items:
             return True
@@ -368,23 +367,6 @@ class Emailer:
                 )
                 plain_sections.append(lec["summary"])
         plain = "\n".join(plain_sections)
-
-        if mode == "plain":
-            # Retain the entire original summary without HTML or image fetches.
-            return self._submit(MIMEText(plain, "plain", "utf-8"), subject,
-                                lecture_count=len(items), image_count=0,
-                                mode=mode)
-
-        if mode == "attachment":
-            msg = MIMEMultipart("mixed")
-            msg.attach(MIMEText("完整课程摘要见文本附件；保留原始 Markdown 和 LaTeX。",
-                                "plain", "utf-8"))
-            attachment = MIMEText(plain, "plain", "utf-8")
-            attachment.add_header("Content-Disposition", "attachment",
-                                  filename="icourse-summary.txt")
-            msg.attach(attachment)
-            return self._submit(msg, subject, lecture_count=len(items),
-                                image_count=0, mode=mode)
 
         if mode == "archive":
             archive_data = BytesIO()
@@ -457,33 +439,6 @@ class Emailer:
             + "</body></html>"
         )
 
-        if mode == "pdf":
-            from weasyprint import HTML, CSS
-
-            # Use the same complete HTML and locally embedded formula images.
-            for cid, png_data in cid_images.items():
-                image_data = base64.b64encode(png_data).decode("ascii")
-                html = html.replace(f"cid:{cid}", f"data:image/png;base64,{image_data}")
-            pdf_css = CSS(string='''
-                @page { size: A4; margin: 18mm; }
-                body { font-family: "Noto Sans CJK SC", sans-serif;
-                       font-size: 10pt; max-width: none; padding: 0; }
-                img { max-width: 100% !important; height: auto !important; }
-                pre { white-space: pre-wrap; overflow-wrap: anywhere; }
-                table { table-layout: fixed; }
-                td, th { overflow-wrap: anywhere; }
-            ''')
-            pdf_bytes = HTML(string=html).write_pdf(stylesheets=[pdf_css])
-            msg = MIMEMultipart("mixed")
-            msg.attach(MIMEText("The complete lecture summary is attached as a PDF.",
-                                "plain", "utf-8"))
-            attachment = MIMEApplication(pdf_bytes, _subtype="pdf")
-            attachment.add_header("Content-Disposition", "attachment",
-                                  filename=f"icourse-summary-{items[0].get('sub_id', 'lecture')}.pdf")
-            msg.attach(attachment)
-            return self._submit(msg, subject, lecture_count=len(items),
-                                image_count=len(cid_images), mode=mode)
-
         # Build MIME: related > alternative > (plain, html) + image attachments
         msg = MIMEMultipart("related", type="multipart/alternative")
 
@@ -505,14 +460,6 @@ class Emailer:
 
         return self._submit(msg, subject, lecture_count=len(items),
                             image_count=len(cid_images), mode=mode)
-
-    def check_delivery(self) -> bool:
-        """Send a small control message; this never represents a lecture."""
-        msg = MIMEText("This is an iCourse email delivery check. "
-                       "No lecture is marked as delivered by this message.",
-                       "plain", "utf-8")
-        return self._submit(msg, "iCourse email delivery check",
-                            lecture_count=0, image_count=0, mode="diagnostic")
 
     def _submit(self, msg, subject: str, *, lecture_count: int,
                 image_count: int, mode: str) -> bool:

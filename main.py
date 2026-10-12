@@ -229,7 +229,10 @@ def _send_email(emailer: Emailer | None, db: Database, reporter: Reporter,
                 seen_sub_ids.add(str(row["sub_id"]))
         reporter.email_recovered_unsent(len(unsent))
 
-    if not (emailer and email_items):
+    if not email_items:
+        reporter.info("[Email] No pending lecture summaries.")
+        return True
+    if not emailer:
         return True
     # Preserve order while ensuring each lecture is submitted only once.
     email_items = list({str(item["sub_id"]): item
@@ -240,7 +243,6 @@ def _send_email(emailer: Emailer | None, db: Database, reporter: Reporter,
     if deferred:
         reporter.info(f"[Email] Delivery limit: deferring {deferred} lecture(s).")
     sent = 0
-    delivery_mode = "html"
     try:
         reporter.email_summary(len(email_items))
         for index, item in enumerate(email_items):
@@ -250,49 +252,22 @@ def _send_email(emailer: Emailer | None, db: Database, reporter: Reporter,
             sub_id = str(item["sub_id"])
             reporter.info(f"[Email] Lecture {index + 1}/{len(email_items)}: "
                           f"sub_id={sub_id}")
-            accepted = emailer.send([item], mode=delivery_mode)
-            if not accepted and delivery_mode == "html" and emailer.last_content_rejected:
-                reporter.info("[Email] HTML content rejected; waiting 30 seconds "
-                              "before sending the complete summary as plain text.")
-                time.sleep(30)
-                delivery_mode = "plain"
-                accepted = emailer.send([item], mode=delivery_mode)
-            if not accepted and delivery_mode == "plain" and emailer.last_content_rejected:
-                reporter.info("[Email] Plain text rejected; waiting 30 seconds "
-                              "before sending the complete summary as a text attachment.")
-                time.sleep(30)
-                delivery_mode = "attachment"
-                accepted = emailer.send([item], mode=delivery_mode)
-            if not accepted and delivery_mode == "attachment" and emailer.last_content_rejected:
-                reporter.info("[Email] Text attachment rejected; waiting 30 seconds "
-                              "before sending the complete summary as a PDF.")
-                time.sleep(30)
-                delivery_mode = "pdf"
-                accepted = emailer.send([item], mode=delivery_mode)
-            if not accepted and delivery_mode == "pdf" and emailer.last_content_rejected:
-                reporter.info("[Email] PDF rejected; waiting 30 seconds before "
+            accepted = emailer.send([item])
+            if not accepted and emailer.last_content_rejected:
+                reporter.info("[Email] HTML content rejected; waiting 30 seconds before "
                               "sending the complete original summary in a ZIP archive.")
                 time.sleep(30)
-                delivery_mode = "archive"
-                accepted = emailer.send([item], mode=delivery_mode)
+                accepted = emailer.send([item], mode="archive")
             if accepted:
                 # Commit immediately: a later rejection must not undo this.
                 db.mark_emailed(sub_id)
                 sent += 1
                 continue
             reporter.email_failed(sub_id)
-            if limit == 1 and emailer.last_content_rejected:
-                reporter.info("[Email] All complete summary formats rejected; "
-                              "the full summary remains pending.")
-                # Diagnose one lecture first; do not hammer the remaining backlog.
-                break
             if not emailer.last_content_rejected:
                 reporter.info("[Email] Stopping this run after a delivery failure; "
                               "remaining lectures stay pending.")
                 break
-            # A rejected lecture must not force the next lecture into a format
-            # that also failed. Give other complete summaries their own chance.
-            delivery_mode = "html"
     except Exception:
         reporter.info("[Email] Delivery or state update failed:")
         traceback.print_exc()
