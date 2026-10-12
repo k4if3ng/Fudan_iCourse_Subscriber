@@ -347,10 +347,10 @@ class Emailer:
             courses.setdefault(item["course_title"], []).append(item)
 
         # Subject
-        parts = [f"{ct} ({len(lecs)})" for ct, lecs in courses.items()]
-        subject = f"[FiCS] {', '.join(parts)}"
+        lecture_ids = ", ".join(str(item.get("sub_id", "")) for item in items)
+        subject = f"iCourse lecture summary {lecture_ids}".strip()
         if any_update:
-            subject += "（含 PPT 识别·更新）"
+            subject += " (updated)"
 
         # Plain text (Markdown as-is, readable without rendering)
         plain_sections = []
