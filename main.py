@@ -275,7 +275,7 @@ def _send_email(emailer: Emailer | None, db: Database, reporter: Reporter,
                 sent += 1
                 continue
             reporter.email_failed(sub_id)
-            if index == 0 and emailer.last_content_rejected:
+            if limit == 1 and emailer.last_content_rejected:
                 reporter.info("[Email] All complete summary formats rejected; "
                               "the full summary remains pending.")
                 # Diagnose one lecture first; do not hammer the remaining backlog.
@@ -284,6 +284,9 @@ def _send_email(emailer: Emailer | None, db: Database, reporter: Reporter,
                 reporter.info("[Email] Stopping this run after a delivery failure; "
                               "remaining lectures stay pending.")
                 break
+            # A rejected lecture must not force the next lecture into a format
+            # that also failed. Give other complete summaries their own chance.
+            delivery_mode = "html"
     except Exception:
         reporter.info("[Email] Delivery or state update failed:")
         traceback.print_exc()
