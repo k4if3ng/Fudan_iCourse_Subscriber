@@ -326,7 +326,7 @@ class Emailer:
                    Optional key:
                    is_update — bool, True for re-summarized lectures (v2
                                PPT-aware format replacing an older v1 summary).
-                               Adds an "（含 PPT 识别·更新）" subject suffix and
+                               Adds an "(updated)" subject suffix and
                                an inline 更新 badge per affected lecture.
 
         Returns:
