@@ -1,7 +1,6 @@
 import re
 import smtplib
 import time
-import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from io import BytesIO
@@ -11,7 +10,8 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.image import MIMEImage
 from html import escape
-from email.utils import formataddr
+from email.policy import SMTP
+from email.utils import formataddr, formatdate, make_msgid
 from urllib.parse import quote
 
 import markdown
@@ -266,7 +266,8 @@ def _resolve_src(url: str, img_data: bytes | None,
                  cid_images: dict | None) -> str:
     """Return a CID reference if embedding, otherwise the original URL."""
     if cid_images is not None and img_data:
-        cid = f"latex-{uuid.uuid4().hex[:12]}"
+        domain = config.SMTP_EMAIL.rsplit("@", 1)[-1] or "icourse.local"
+        cid = make_msgid(idstring="latex", domain=domain)[1:-1]
         cid_images[cid] = img_data
         return f"cid:{cid}"
     return url
@@ -281,6 +282,33 @@ class Emailer:
         self.sender = config.SMTP_EMAIL
         self.password = config.SMTP_PASSWORD
         self.receiver = config.RECEIVER_EMAIL
+        self.last_error_code: int | None = None
+        self.last_rate_limited = False
+        self.last_content_rejected = False
+
+    def _record_smtp_failure(self, code: int, response: bytes | str,
+                             stage: str) -> None:
+        """Classify a rejection without treating every 550 as content filtering."""
+        self.last_error_code = code
+        text = (response.decode("utf-8", errors="replace")
+                if isinstance(response, bytes) else str(response))
+        lowered = text.lower()
+        self.last_rate_limited = code == 421 or any(
+            marker in lowered for marker in (
+                "too many", "rate limit", "frequency", "quota",
+                "daily limit", "sending limit", "频率", "频繁",
+            )
+        )
+        self.last_content_rejected = (
+            stage == "data" and code in (550, 552, 554)
+            and not self.last_rate_limited
+            and any(marker in lowered for marker in (
+                "content", "spam", "message size", "too large",
+            ))
+        )
+        print(f"[Emailer] SMTP rejection: stage={stage}, code={code}, "
+              f"rate_limited={self.last_rate_limited}, "
+              f"content_rejected={self.last_content_rejected}, response={text}")
 
     def send(self, items: list[dict]) -> bool:
         """Send a single email containing all lecture summaries.
@@ -299,8 +327,13 @@ class Emailer:
                                an inline 更新 badge per affected lecture.
 
         Returns:
-            True if email was sent successfully, False otherwise.
+            True if SMTP accepted the email, False otherwise. Only explicit
+            transient rejections or connection failures before submission are
+            retried; an uncertain DATA delivery remains pending.
         """
+        self.last_error_code = None
+        self.last_rate_limited = False
+        self.last_content_rejected = False
         if not items:
             return True
 
@@ -386,10 +419,12 @@ class Emailer:
         )
 
         # Build MIME: related > alternative > (plain, html) + image attachments
-        msg = MIMEMultipart("related")
+        msg = MIMEMultipart("related", type="multipart/alternative")
         msg["Subject"] = subject
         msg["From"] = formataddr(("iCourse Subscriber", self.sender))
         msg["To"] = self.receiver
+        msg["Date"] = formatdate(localtime=False)
+        msg["Message-ID"] = make_msgid(domain=self.sender.rsplit("@", 1)[-1])
 
         msg_alt = MIMEMultipart("alternative")
         msg_alt.attach(MIMEText(plain, "plain", "utf-8"))
@@ -407,18 +442,63 @@ class Emailer:
         if cid_images:
             print(f"[Emailer] Embedded {len(cid_images)} LaTeX images as CID")
 
-        # Retry with exponential backoff
+        payload = msg.as_bytes(policy=SMTP)
+        print(f"[Emailer] Prepared: lectures={len(items)}, bytes={len(payload)}, "
+              f"images={len(cid_images)}, message_id={msg['Message-ID']}")
+
+        # Retry explicit transient rejections and failures before submission.
         for attempt in range(3):
+            stage = "connect"
+            accepted = False
             try:
-                with smtplib.SMTP_SSL(self.host, self.port) as server:
+                with smtplib.SMTP_SSL(self.host, self.port, timeout=60) as server:
+                    stage = "login"
                     server.login(self.sender, self.password)
-                    server.sendmail(self.sender, self.receiver, msg.as_string())
-                print(f"[Emailer] Sent: {subject}")
+                    stage = "submit"
+                    refused = server.sendmail(self.sender, self.receiver, payload)
+                    if refused:
+                        raise smtplib.SMTPRecipientsRefused(refused)
+                    accepted = True
+                    stage = "quit"
+                print(f"[Emailer] SMTP accepted: {subject}")
                 return True
+            except smtplib.SMTPRecipientsRefused as e:
+                code, response = next(iter(e.recipients.values()))
+                self._record_smtp_failure(code, response, "recipient")
+                if self.last_rate_limited or not 400 <= code < 500:
+                    return False
+            except smtplib.SMTPResponseException as e:
+                if accepted:
+                    print(f"[Emailer] SMTP accepted; QUIT failed: {type(e).__name__}")
+                    return True
+                failure_stage = (
+                    "data" if isinstance(e, smtplib.SMTPDataError) else
+                    "sender" if isinstance(e, smtplib.SMTPSenderRefused) else stage
+                )
+                self._record_smtp_failure(e.smtp_code, e.smtp_error, failure_stage)
+                if self.last_rate_limited or not 400 <= e.smtp_code < 500:
+                    return False
+            except (OSError, smtplib.SMTPServerDisconnected) as e:
+                if accepted:
+                    print(f"[Emailer] SMTP accepted; QUIT failed: {type(e).__name__}")
+                    return True
+                print(f"[Emailer] {type(e).__name__}: stage={stage}, "
+                      f"attempt={attempt + 1}/3, error={e}")
+                if stage == "submit":
+                    # No final response: SMTP may already have accepted DATA.
+                    print("[Emailer] Delivery uncertain; stopping without immediate "
+                          "resubmission. Summary remains pending.")
+                    return False
             except Exception as e:
-                print(f"[Emailer] Attempt {attempt + 1}/3 failed: {e}")
-                if attempt < 2:
-                    time.sleep(2 ** attempt)
+                if accepted:
+                    print(f"[Emailer] SMTP accepted; QUIT failed: {type(e).__name__}")
+                    return True
+                print(f"[Emailer] {type(e).__name__}: stage={stage}, error={e}")
+                return False
+            if attempt < 2:
+                delay = 5 * 2 ** attempt
+                print(f"[Emailer] Transient failure; retrying in {delay} seconds.")
+                time.sleep(delay)
 
         print("[Emailer] All send attempts failed.")
         return False

@@ -80,10 +80,12 @@ class Reporter:
             print("iCourse Subscriber — starting run")
             print(bar, flush=True)
 
-    def run_footer(self):
+    def run_footer(self, success: bool = True):
         with self._lock:
             print(f"\n{'=' * 60}")
-            print("Run complete.", flush=True)
+            message = ("Run complete." if success else
+                       "Run finished with incomplete email delivery.")
+            print(message, flush=True)
 
     # ── Course-level ─────────────────────────────────────────────────────
 
@@ -299,9 +301,10 @@ class Reporter:
             print(f"\n[Email] Sending summary for {n} lecture(s)...",
                   flush=True)
 
-    def email_failed(self):
+    def email_failed(self, sub_id: str | None = None):
         with self._lock:
-            print("[Email] Send failed, lectures will be retried next run.",
+            target = f" (sub_id={sub_id})" if sub_id else ""
+            print(f"[Email] Send failed{target}; summary remains pending.",
                   flush=True)
 
     def email_recovered_unsent(self, n: int):

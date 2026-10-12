@@ -197,13 +197,13 @@ def _drive_lectures(client: ICourseClient, db: Database,
 
 
 def _send_email(emailer: Emailer | None, db: Database, reporter: Reporter,
-                email_items: list) -> None:
-    """Append any previously-processed-but-unsent lectures, then send."""
+                email_items: list) -> bool:
+    """Send lectures separately and persist each successful delivery."""
     unsent = db.get_unsent_lectures()
     if unsent:
-        seen_sub_ids = {item["sub_id"] for item in email_items}
+        seen_sub_ids = {str(item["sub_id"]) for item in email_items}
         for row in unsent:
-            if row["sub_id"] not in seen_sub_ids:
+            if str(row["sub_id"]) not in seen_sub_ids:
                 email_items.append({
                     "sub_id": row["sub_id"],
                     "course_title": row["course_title"],
@@ -211,19 +211,41 @@ def _send_email(emailer: Emailer | None, db: Database, reporter: Reporter,
                     "date": row["date"],
                     "summary": row["summary"],
                 })
+                seen_sub_ids.add(str(row["sub_id"]))
         reporter.email_recovered_unsent(len(unsent))
 
     if not (emailer and email_items):
-        return
+        return True
+    # Preserve order while ensuring each lecture is submitted only once.
+    email_items = list({str(item["sub_id"]): item
+                        for item in email_items}.values())
+    sent = 0
     try:
         reporter.email_summary(len(email_items))
-        if emailer.send(email_items):
-            db.mark_emailed_batch([item["sub_id"] for item in email_items])
-        else:
-            reporter.email_failed()
+        for index, item in enumerate(email_items):
+            if index:
+                reporter.info("[Email] Waiting 30 seconds before the next lecture...")
+                time.sleep(30)
+            sub_id = str(item["sub_id"])
+            reporter.info(f"[Email] Lecture {index + 1}/{len(email_items)}: "
+                          f"sub_id={sub_id}")
+            if emailer.send([item]):
+                # Commit immediately: a later rejection must not undo this.
+                db.mark_emailed(sub_id)
+                sent += 1
+                continue
+            reporter.email_failed(sub_id)
+            if not emailer.last_content_rejected:
+                reporter.info("[Email] Stopping this run after a delivery failure; "
+                              "remaining lectures stay pending.")
+                break
     except Exception:
-        reporter.info("[Email] Failed to send:")
+        reporter.info("[Email] Delivery or state update failed:")
         traceback.print_exc()
+        return False
+    pending = len(email_items) - sent
+    reporter.info(f"[Email] SMTP accepted and saved: {sent}; pending: {pending}.")
+    return pending == 0
 
 
 def _crawl_semester_catalog(client: ICourseClient, db: Database,
@@ -335,8 +357,10 @@ def run():
     finally:
         scheduler.shutdown()
 
-    _send_email(emailer, db, reporter, email_items)
-    reporter.run_footer()
+    email_ok = _send_email(emailer, db, reporter, email_items)
+    reporter.run_footer(success=email_ok)
+    if not email_ok:
+        raise RuntimeError("Email delivery incomplete; unsent summaries remain pending.")
 
 
 if __name__ == "__main__":
