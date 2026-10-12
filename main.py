@@ -254,12 +254,28 @@ def _send_email(emailer: Emailer | None, db: Database, reporter: Reporter,
                 time.sleep(30)
                 delivery_mode = "plain"
                 accepted = emailer.send([item], mode=delivery_mode)
+            if not accepted and delivery_mode == "plain" and emailer.last_content_rejected:
+                reporter.info("[Email] Plain text rejected; waiting 30 seconds "
+                              "before sending the complete summary as a text attachment.")
+                time.sleep(30)
+                delivery_mode = "attachment"
+                accepted = emailer.send([item], mode=delivery_mode)
             if accepted:
                 # Commit immediately: a later rejection must not undo this.
                 db.mark_emailed(sub_id)
                 sent += 1
                 continue
             reporter.email_failed(sub_id)
+            if index == 0 and emailer.last_content_rejected:
+                reporter.info("[Email] All complete summary formats rejected; "
+                              "waiting 30 seconds before a minimal delivery check. "
+                              "The check does not mark any lecture as sent.")
+                time.sleep(30)
+                diagnostic_ok = emailer.check_delivery()
+                reporter.info(f"[Email] Minimal delivery check accepted={diagnostic_ok}; "
+                              "the full summary remains pending.")
+                # Diagnose one lecture first; do not hammer the remaining backlog.
+                break
             if not emailer.last_content_rejected:
                 reporter.info("[Email] Stopping this run after a delivery failure; "
                               "remaining lectures stay pending.")

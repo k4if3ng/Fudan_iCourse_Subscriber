@@ -334,7 +334,7 @@ class Emailer:
         self.last_error_code = None
         self.last_rate_limited = False
         self.last_content_rejected = False
-        if mode not in ("html", "plain"):
+        if mode not in ("html", "plain", "attachment"):
             raise ValueError(f"Unsupported email mode: {mode}")
         if not items:
             return True
@@ -371,6 +371,17 @@ class Emailer:
             return self._submit(MIMEText(plain, "plain", "utf-8"), subject,
                                 lecture_count=len(items), image_count=0,
                                 mode=mode)
+
+        if mode == "attachment":
+            msg = MIMEMultipart("mixed")
+            msg.attach(MIMEText("完整课程摘要见文本附件；保留原始 Markdown 和 LaTeX。",
+                                "plain", "utf-8"))
+            attachment = MIMEText(plain, "plain", "utf-8")
+            attachment.add_header("Content-Disposition", "attachment",
+                                  filename="icourse-summary.txt")
+            msg.attach(attachment)
+            return self._submit(msg, subject, lecture_count=len(items),
+                                image_count=0, mode=mode)
 
         # HTML (Markdown → styled HTML with CID-embedded LaTeX images)
         cid_images: dict[str, bytes] = {}
@@ -448,9 +459,20 @@ class Emailer:
         return self._submit(msg, subject, lecture_count=len(items),
                             image_count=len(cid_images), mode=mode)
 
+    def check_delivery(self) -> bool:
+        """Send a small control message; this never represents a lecture."""
+        msg = MIMEText("This is an iCourse email delivery check. "
+                       "No lecture is marked as delivered by this message.",
+                       "plain", "utf-8")
+        return self._submit(msg, "iCourse email delivery check",
+                            lecture_count=0, image_count=0, mode="diagnostic")
+
     def _submit(self, msg, subject: str, *, lecture_count: int,
                 image_count: int, mode: str) -> bool:
         """Submit one complete representation with shared SMTP error handling."""
+        self.last_error_code = None
+        self.last_rate_limited = False
+        self.last_content_rejected = False
         msg["Subject"] = subject
         msg["From"] = formataddr(("iCourse Subscriber", self.sender))
         msg["To"] = self.receiver
