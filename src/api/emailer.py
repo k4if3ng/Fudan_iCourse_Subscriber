@@ -1,4 +1,5 @@
 import re
+import base64
 import smtplib
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -9,6 +10,7 @@ from collections import OrderedDict
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.image import MIMEImage
+from email.mime.application import MIMEApplication
 from html import escape
 from email.policy import SMTP
 from email.utils import formataddr, formatdate, make_msgid
@@ -334,7 +336,7 @@ class Emailer:
         self.last_error_code = None
         self.last_rate_limited = False
         self.last_content_rejected = False
-        if mode not in ("html", "plain", "attachment"):
+        if mode not in ("html", "plain", "attachment", "pdf"):
             raise ValueError(f"Unsupported email mode: {mode}")
         if not items:
             return True
@@ -436,6 +438,33 @@ class Emailer:
             + "\n".join(body_parts)
             + "</body></html>"
         )
+
+        if mode == "pdf":
+            from weasyprint import HTML, CSS
+
+            # Use the same complete HTML and locally embedded formula images.
+            for cid, png_data in cid_images.items():
+                image_data = base64.b64encode(png_data).decode("ascii")
+                html = html.replace(f"cid:{cid}", f"data:image/png;base64,{image_data}")
+            pdf_css = CSS(string='''
+                @page { size: A4; margin: 18mm; }
+                body { font-family: "Noto Sans CJK SC", sans-serif;
+                       font-size: 10pt; max-width: none; padding: 0; }
+                img { max-width: 100% !important; height: auto !important; }
+                pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+                table { table-layout: fixed; }
+                td, th { overflow-wrap: anywhere; }
+            ''')
+            pdf_bytes = HTML(string=html).write_pdf(stylesheets=[pdf_css])
+            msg = MIMEMultipart("mixed")
+            msg.attach(MIMEText("The complete lecture summary is attached as a PDF.",
+                                "plain", "utf-8"))
+            attachment = MIMEApplication(pdf_bytes, _subtype="pdf")
+            attachment.add_header("Content-Disposition", "attachment",
+                                  filename=f"icourse-summary-{items[0].get('sub_id', 'lecture')}.pdf")
+            msg.attach(attachment)
+            return self._submit(msg, subject, lecture_count=len(items),
+                                image_count=len(cid_images), mode=mode)
 
         # Build MIME: related > alternative > (plain, html) + image attachments
         msg = MIMEMultipart("related", type="multipart/alternative")
