@@ -269,6 +269,12 @@ def _send_email(emailer: Emailer | None, db: Database, reporter: Reporter,
                 time.sleep(30)
                 delivery_mode = "pdf"
                 accepted = emailer.send([item], mode=delivery_mode)
+            if not accepted and delivery_mode == "pdf" and emailer.last_content_rejected:
+                reporter.info("[Email] PDF rejected; waiting 30 seconds before "
+                              "sending the complete original summary in a ZIP archive.")
+                time.sleep(30)
+                delivery_mode = "archive"
+                accepted = emailer.send([item], mode=delivery_mode)
             if accepted:
                 # Commit immediately: a later rejection must not undo this.
                 db.mark_emailed(sub_id)

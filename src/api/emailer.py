@@ -2,6 +2,7 @@ import re
 import base64
 import smtplib
 import time
+import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from io import BytesIO
@@ -336,7 +337,7 @@ class Emailer:
         self.last_error_code = None
         self.last_rate_limited = False
         self.last_content_rejected = False
-        if mode not in ("html", "plain", "attachment", "pdf"):
+        if mode not in ("html", "plain", "attachment", "pdf", "archive"):
             raise ValueError(f"Unsupported email mode: {mode}")
         if not items:
             return True
@@ -381,6 +382,23 @@ class Emailer:
             attachment = MIMEText(plain, "plain", "utf-8")
             attachment.add_header("Content-Disposition", "attachment",
                                   filename="icourse-summary.txt")
+            msg.attach(attachment)
+            return self._submit(msg, subject, lecture_count=len(items),
+                                image_count=0, mode=mode)
+
+        if mode == "archive":
+            archive_data = BytesIO()
+            lecture_id = str(items[0].get("sub_id", "lecture"))
+            with zipfile.ZipFile(archive_data, "w", zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr(f"icourse-summary-{lecture_id}.md",
+                                 plain.encode("utf-8"))
+            msg = MIMEMultipart("mixed")
+            msg.attach(MIMEText("The complete lecture summary is attached as a ZIP "
+                                "archive containing the original Markdown and LaTeX source.",
+                                "plain", "utf-8"))
+            attachment = MIMEApplication(archive_data.getvalue(), _subtype="zip")
+            attachment.add_header("Content-Disposition", "attachment",
+                                  filename=f"icourse-summary-{lecture_id}.zip")
             msg.attach(attachment)
             return self._submit(msg, subject, lecture_count=len(items),
                                 image_count=0, mode=mode)
