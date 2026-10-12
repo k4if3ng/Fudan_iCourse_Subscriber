@@ -237,6 +237,7 @@ def _send_email(emailer: Emailer | None, db: Database, reporter: Reporter,
     if deferred:
         reporter.info(f"[Email] Delivery limit: deferring {deferred} lecture(s).")
     sent = 0
+    delivery_mode = "html"
     try:
         reporter.email_summary(len(email_items))
         for index, item in enumerate(email_items):
@@ -246,7 +247,14 @@ def _send_email(emailer: Emailer | None, db: Database, reporter: Reporter,
             sub_id = str(item["sub_id"])
             reporter.info(f"[Email] Lecture {index + 1}/{len(email_items)}: "
                           f"sub_id={sub_id}")
-            if emailer.send([item]):
+            accepted = emailer.send([item], mode=delivery_mode)
+            if not accepted and delivery_mode == "html" and emailer.last_content_rejected:
+                reporter.info("[Email] HTML content rejected; waiting 30 seconds "
+                              "before sending the complete summary as plain text.")
+                time.sleep(30)
+                delivery_mode = "plain"
+                accepted = emailer.send([item], mode=delivery_mode)
+            if accepted:
                 # Commit immediately: a later rejection must not undo this.
                 db.mark_emailed(sub_id)
                 sent += 1

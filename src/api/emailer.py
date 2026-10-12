@@ -310,7 +310,7 @@ class Emailer:
               f"rate_limited={self.last_rate_limited}, "
               f"content_rejected={self.last_content_rejected}, response={text}")
 
-    def send(self, items: list[dict]) -> bool:
+    def send(self, items: list[dict], *, mode: str = "html") -> bool:
         """Send a single email containing all lecture summaries.
 
         LaTeX formulas are rendered as PNG images and embedded directly into
@@ -334,6 +334,8 @@ class Emailer:
         self.last_error_code = None
         self.last_rate_limited = False
         self.last_content_rejected = False
+        if mode not in ("html", "plain"):
+            raise ValueError(f"Unsupported email mode: {mode}")
         if not items:
             return True
 
@@ -363,6 +365,12 @@ class Emailer:
                 )
                 plain_sections.append(lec["summary"])
         plain = "\n".join(plain_sections)
+
+        if mode == "plain":
+            # Retain the entire original summary without HTML or image fetches.
+            return self._submit(MIMEText(plain, "plain", "utf-8"), subject,
+                                lecture_count=len(items), image_count=0,
+                                mode=mode)
 
         # HTML (Markdown → styled HTML with CID-embedded LaTeX images)
         cid_images: dict[str, bytes] = {}
@@ -420,11 +428,6 @@ class Emailer:
 
         # Build MIME: related > alternative > (plain, html) + image attachments
         msg = MIMEMultipart("related", type="multipart/alternative")
-        msg["Subject"] = subject
-        msg["From"] = formataddr(("iCourse Subscriber", self.sender))
-        msg["To"] = self.receiver
-        msg["Date"] = formatdate(localtime=False)
-        msg["Message-ID"] = make_msgid(domain=self.sender.rsplit("@", 1)[-1])
 
         msg_alt = MIMEMultipart("alternative")
         msg_alt.attach(MIMEText(plain, "plain", "utf-8"))
@@ -442,9 +445,22 @@ class Emailer:
         if cid_images:
             print(f"[Emailer] Embedded {len(cid_images)} LaTeX images as CID")
 
+        return self._submit(msg, subject, lecture_count=len(items),
+                            image_count=len(cid_images), mode=mode)
+
+    def _submit(self, msg, subject: str, *, lecture_count: int,
+                image_count: int, mode: str) -> bool:
+        """Submit one complete representation with shared SMTP error handling."""
+        msg["Subject"] = subject
+        msg["From"] = formataddr(("iCourse Subscriber", self.sender))
+        msg["To"] = self.receiver
+        msg["Date"] = formatdate(localtime=False)
+        msg["Message-ID"] = make_msgid(domain=self.sender.rsplit("@", 1)[-1])
+
         payload = msg.as_bytes(policy=SMTP)
-        print(f"[Emailer] Prepared: lectures={len(items)}, bytes={len(payload)}, "
-              f"images={len(cid_images)}, message_id={msg['Message-ID']}")
+        print(f"[Emailer] Prepared: mode={mode}, lectures={lecture_count}, "
+              f"bytes={len(payload)}, images={image_count}, "
+              f"message_id={msg['Message-ID']}")
 
         # Retry explicit transient rejections and failures before submission.
         for attempt in range(3):
