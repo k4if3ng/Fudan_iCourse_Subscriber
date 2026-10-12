@@ -213,6 +213,10 @@ def _send_email(emailer: Emailer | None, db: Database, reporter: Reporter,
         raise ValueError("Email limit must be non-negative.")
     unsent = db.get_unsent_lectures()
     if unsent:
+        # Keep new summaries ahead of older pending ones, with deterministic
+        # ordering for a limited email-only run.
+        unsent.sort(key=lambda row: (str(row.get("date") or ""),
+                                     str(row["sub_id"])), reverse=True)
         seen_sub_ids = {str(item["sub_id"]) for item in email_items}
         for row in unsent:
             if str(row["sub_id"]) not in seen_sub_ids:
@@ -274,11 +278,6 @@ def _send_email(emailer: Emailer | None, db: Database, reporter: Reporter,
             reporter.email_failed(sub_id)
             if index == 0 and emailer.last_content_rejected:
                 reporter.info("[Email] All complete summary formats rejected; "
-                              "waiting 30 seconds before a minimal delivery check. "
-                              "The check does not mark any lecture as sent.")
-                time.sleep(30)
-                diagnostic_ok = emailer.check_delivery()
-                reporter.info(f"[Email] Minimal delivery check accepted={diagnostic_ok}; "
                               "the full summary remains pending.")
                 # Diagnose one lecture first; do not hammer the remaining backlog.
                 break
